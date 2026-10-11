@@ -1,0 +1,6 @@
+{
+  "name": "MailForge 高級郵件草稿快速生成工具",
+  "description": "專為商務人士打造的模組化郵件範本管理與動態變數填空系統，支援即時預覽、一鍵複製與 JSON 備份匯出入。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
