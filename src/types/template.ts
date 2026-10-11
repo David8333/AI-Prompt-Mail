@@ -2,9 +2,6 @@ export type TemplateCategory =
   | '全部'
   | '商務開發'
   | '專案協作'
-  | '客戶服務'
-  | '人資招聘'
-  | '帳務催款'
   | '會議跟進';
 
 export interface EmailTemplate {

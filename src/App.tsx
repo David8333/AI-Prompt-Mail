@@ -25,6 +25,8 @@ import {
   Save,
   MousePointerClick,
   Wand2,
+  FolderPlus,
+  Undo2,
 } from 'lucide-react';
 import {
   EmailTemplate,
@@ -36,7 +38,7 @@ import {
 import {
   DEFAULT_TEMPLATES,
   TEMPLATE_CATEGORIES,
-  QUICK_VARIABLE_CHIPS,
+  DEFAULT_VARIABLE_CHIPS,
 } from './data/defaultTemplates';
 import {
   extractVariables,
@@ -47,12 +49,19 @@ import {
 } from './utils/templateParser';
 
 const STORAGE_KEYS = {
-  TEMPLATES: 'mailforge_templates_v1',
-  VALUES: 'mailforge_variable_values_v1',
-  ACTIVE_ID: 'mailforge_active_template_id_v1',
-  CUSTOM_CHIPS: 'mailforge_custom_chips_v1',
+  TEMPLATES: 'mailforge_templates_v2',
+  VALUES: 'mailforge_variable_values_v2',
+  ACTIVE_ID: 'mailforge_active_template_id_v2',
+  VARIABLE_CHIPS: 'mailforge_variable_chips_v2',
   HISTORY: 'mailforge_copy_history_v1',
 };
+
+const REMOVED_CATEGORIES = new Set(['客戶服務', '人資招聘', '帳務催款']);
+const REMOVED_TEMPLATE_IDS = new Set([
+  'tpl-invoice-reminder',
+  'tpl-hr-offer',
+  'tpl-customer-incident',
+]);
 
 interface ToastMessage {
   id: string;
@@ -62,14 +71,28 @@ interface ToastMessage {
 }
 
 export default function App() {
-  // 1. Persistent Templates State
+  // 1. Persistent Templates State — Filters out removed categories/templates & respects empty array []
   const [templates, setTemplates] = useState<EmailTemplate[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.TEMPLATES);
-      if (saved) {
+      const saved =
+        localStorage.getItem(STORAGE_KEYS.TEMPLATES) ??
+        localStorage.getItem('mailforge_templates_v1');
+      if (saved !== null) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
+        if (Array.isArray(parsed)) {
+          return parsed
+            .filter(
+              (tpl: EmailTemplate) =>
+                !REMOVED_TEMPLATE_IDS.has(tpl.id) &&
+                !REMOVED_CATEGORIES.has(tpl.category)
+            )
+            .map((tpl: EmailTemplate) => ({
+              ...tpl,
+              category: (TEMPLATE_CATEGORIES.includes(tpl.category as TemplateCategory) &&
+              tpl.category !== '全部'
+                ? tpl.category
+                : '商務開發') as Exclude<TemplateCategory, '全部'>,
+            }));
         }
       }
     } catch (e) {
@@ -81,19 +104,23 @@ export default function App() {
   // 2. Active Template ID
   const [activeTemplateId, setActiveTemplateId] = useState<string>(() => {
     try {
-      const savedId = localStorage.getItem(STORAGE_KEYS.ACTIVE_ID);
-      if (savedId) return savedId;
+      const savedId =
+        localStorage.getItem(STORAGE_KEYS.ACTIVE_ID) ??
+        localStorage.getItem('mailforge_active_template_id_v1');
+      if (savedId && !REMOVED_TEMPLATE_IDS.has(savedId)) return savedId;
     } catch {
       // ignore
     }
-    return DEFAULT_TEMPLATES[0].id;
+    return DEFAULT_TEMPLATES[0]?.id || '';
   });
 
   // 3. Per-Template Variable Values Map
   const [variableValuesMap, setVariableValuesMap] = useState<VariableValuesMap>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.VALUES);
-      if (saved) {
+      const saved =
+        localStorage.getItem(STORAGE_KEYS.VALUES) ??
+        localStorage.getItem('mailforge_variable_values_v1');
+      if (saved !== null) {
         return JSON.parse(saved) || {};
       }
     } catch (e) {
@@ -108,15 +135,18 @@ export default function App() {
     return initialMap;
   });
 
-  // 4. User's Custom Saved Variable Chips
-  const [customChips, setCustomChips] = useState<string[]>(() => {
+  // 4. Unified Editable Variable Chips (Can both ADD and DELETE any variable chip!)
+  const [variableChips, setVariableChips] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEYS.CUSTOM_CHIPS);
-      if (saved) return JSON.parse(saved) || [];
+      const saved = localStorage.getItem(STORAGE_KEYS.VARIABLE_CHIPS);
+      if (saved !== null) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
     } catch {
       // ignore
     }
-    return [];
+    return DEFAULT_VARIABLE_CHIPS;
   });
 
   // 5. Copy History State
@@ -130,26 +160,32 @@ export default function App() {
     return [];
   });
 
+  // Undo buffer for recently deleted template(s)
+  const [lastDeletedBackup, setLastDeletedBackup] = useState<{
+    templates: EmailTemplate[];
+    label: string;
+  } | null>(null);
+
   // UI & Filter States
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<TemplateCategory>('全部');
   const [mobileTab, setMobileTab] = useState<'templates' | 'design' | 'fillAndPreview'>('design');
   const [highlightVariables, setHighlightVariables] = useState<boolean>(true);
-  const [keepEmptyBrackets, setKeepEmptyBrackets] = useState<boolean>(true);
   const [focusedVariable, setFocusedVariable] = useState<string | null>(null);
   const [customMultilineVars, setCustomMultilineVars] = useState<Record<string, boolean>>({});
   const [customVarInput, setCustomVarInput] = useState('');
-  const [saveToChipLibrary, setSaveToChipLibrary] = useState(true);
   const [recipientEmail, setRecipientEmail] = useState('');
   const [ccEmail, setCcEmail] = useState('');
 
   // Copy & Save feedback states
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [savedFeedback, setSavedFeedback] = useState(false);
+  const [savedFeedbackId, setSavedFeedbackId] = useState<string | null>(null);
+  const [lastSavedTime, setLastSavedTime] = useState<string>(() =>
+    new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  );
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   // Modals & Confirmation States
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [showResetModal, setShowResetModal] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showNewTemplateModal, setShowNewTemplateModal] = useState(false);
@@ -182,6 +218,13 @@ export default function App() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.TEMPLATES, JSON.stringify(templates));
+      setLastSavedTime(
+        new Date().toLocaleTimeString('zh-TW', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      );
     } catch (e) {
       console.error('Failed to save templates:', e);
     }
@@ -205,11 +248,11 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEYS.CUSTOM_CHIPS, JSON.stringify(customChips));
+      localStorage.setItem(STORAGE_KEYS.VARIABLE_CHIPS, JSON.stringify(variableChips));
     } catch {
       // ignore
     }
-  }, [customChips]);
+  }, [variableChips]);
 
   useEffect(() => {
     try {
@@ -229,11 +272,12 @@ export default function App() {
     setToasts((prev) => [...prev.slice(-2), { id, title, detail, type }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3200);
+    }, 3500);
   };
 
-  // Ensure activeTemplate always points to a valid template
+  // Ensure activeTemplate points to a valid template (or null if library is empty)
   const activeTemplate = useMemo(() => {
+    if (templates.length === 0) return null;
     return templates.find((t) => t.id === activeTemplateId) || templates[0] || null;
   }, [templates, activeTemplateId]);
 
@@ -278,16 +322,16 @@ export default function App() {
     ).length;
   }, [detectedVariables, currentValues]);
 
-  // Rendered plain text for Subject and Body
+  // Rendered plain text for Subject and Body (Do not keep [變數框] when unfilled)
   const renderedSubject = useMemo(() => {
     if (!activeTemplate) return '';
-    return renderPlainText(activeTemplate.subject, currentValues, keepEmptyBrackets);
-  }, [activeTemplate, currentValues, keepEmptyBrackets]);
+    return renderPlainText(activeTemplate.subject, currentValues, false);
+  }, [activeTemplate, currentValues]);
 
   const renderedBody = useMemo(() => {
     if (!activeTemplate) return '';
-    return renderPlainText(activeTemplate.body, currentValues, keepEmptyBrackets);
-  }, [activeTemplate, currentValues, keepEmptyBrackets]);
+    return renderPlainText(activeTemplate.body, currentValues, false);
+  }, [activeTemplate, currentValues]);
 
   // Parsed segments for rich preview
   const subjectSegments = useMemo(() => {
@@ -311,17 +355,92 @@ export default function App() {
     );
   };
 
-  // Explicit Save Feedback button handler
-  const handleExplicitSave = () => {
+  // Explicit Save Single Template handler
+  const handleSaveSingleTemplate = (tpl: EmailTemplate, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     try {
-      localStorage.setItem(STORAGE_KEYS.TEMPLATES, JSON.stringify(templates));
+      const now = new Date().toISOString();
+      const currentFilled = variableValuesMap[tpl.id] || {};
+      const updatedList = templates.map((item) =>
+        item.id === tpl.id
+          ? {
+              ...item,
+              updatedAt: now,
+              sampleValues: { ...(item.sampleValues || {}), ...currentFilled },
+            }
+          : item
+      );
+      setTemplates(updatedList);
+      localStorage.setItem(STORAGE_KEYS.TEMPLATES, JSON.stringify(updatedList));
       localStorage.setItem(STORAGE_KEYS.VALUES, JSON.stringify(variableValuesMap));
-      setSavedFeedback(true);
-      setTimeout(() => setSavedFeedback(false), 2000);
-      pushToast('範本已儲存', `「${activeTemplate?.name}」的固定文字與變數框設定已完整保存`);
+      setSavedFeedbackId(tpl.id);
+      setTimeout(() => {
+        setSavedFeedbackId((prev) => (prev === tpl.id ? null : prev));
+      }, 2000);
+      pushToast('已儲存範本', `「${tpl.name || '未命名範本'}」與目前變數內容已完整儲存至範本庫`);
     } catch {
       pushToast('儲存失敗', '請檢查瀏覽器儲存空間設定', 'error');
     }
+  };
+
+  // Save current template as a brand new template in the library ("另存為新範本")
+  const handleSaveAsNewTemplate = () => {
+    if (!activeTemplate) return;
+    const newId = `tpl-${Date.now()}`;
+    const currentFilled = variableValuesMap[activeTemplate.id] || {};
+    const cloned: EmailTemplate = {
+      ...activeTemplate,
+      id: newId,
+      name: `${activeTemplate.name || '自訂範本'} (另存新檔)`,
+      isPinned: false,
+      updatedAt: new Date().toISOString(),
+      sampleValues: { ...(activeTemplate.sampleValues || {}), ...currentFilled },
+    };
+    const nextList = [cloned, ...templates];
+    setTemplates(nextList);
+    setVariableValuesMap((prev) => ({
+      ...prev,
+      [newId]: { ...currentFilled },
+    }));
+    setActiveTemplateId(newId);
+    pushToast('已另存為新範本', `已新增「${cloned.name}」至左側範本庫`);
+  };
+
+  // Delete ANY template in the library
+  const handleDeleteTemplate = (tplId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const target = templates.find((t) => t.id === tplId);
+    if (!target) return;
+
+    setLastDeletedBackup({
+      templates: [...templates],
+      label: target.name || '未命名範本',
+    });
+
+    const remaining = templates.filter((t) => t.id !== tplId);
+    setTemplates(remaining);
+
+    if (activeTemplateId === tplId) {
+      setActiveTemplateId(remaining[0]?.id || '');
+    }
+
+    pushToast(
+      `已刪除「${target.name || '未命名範本'}」`,
+      remaining.length === 0
+        ? '範本庫已清空，您可隨時點擊「新增空白範本」或「復原刪除」'
+        : '若誤刪可點擊左側「復原刪除」按鈕還原'
+    );
+  };
+
+  // Undo last delete
+  const handleUndoDelete = () => {
+    if (!lastDeletedBackup) return;
+    setTemplates(lastDeletedBackup.templates);
+    if (lastDeletedBackup.templates.length > 0 && !activeTemplateId) {
+      setActiveTemplateId(lastDeletedBackup.templates[0].id);
+    }
+    pushToast('已復原刪除的範本', `已還原「${lastDeletedBackup.label}」`);
+    setLastDeletedBackup(null);
   };
 
   // Update a specific variable value for the active template
@@ -336,6 +455,18 @@ export default function App() {
     }));
   };
 
+  // Remove a [變數框] token from the active template's Subject and Body
+  const handleRemoveVariableFromTemplate = (varName: string) => {
+    if (!activeTemplate) return;
+    const escaped = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\[\\s*${escaped}\\s*\\]`, 'g');
+    updateActiveTemplate({
+      subject: activeTemplate.subject.replace(regex, ''),
+      body: activeTemplate.body.replace(regex, ''),
+    });
+    pushToast(`已從範本移除 [${varName}]`, '已同步從主旨與內文中刪除該變數框');
+  };
+
   // Open New Template Creation Modal
   const openNewTemplateDialog = (defaultMode: 'blank' | 'starter' = 'blank') => {
     setNewTplName('');
@@ -348,7 +479,7 @@ export default function App() {
   const handleCreateTemplateConfirm = (e: React.FormEvent) => {
     e.preventDefault();
     const newId = `tpl-${Date.now()}`;
-    const finalName = newTplName.trim() || '自訂郵件範本';
+    const finalName = newTplName.trim() || `自訂郵件範本 ${templates.length + 1}`;
 
     const newTemplate: EmailTemplate =
       newTplMode === 'blank'
@@ -395,7 +526,7 @@ export default function App() {
     });
 
     pushToast(
-      `已建立「${finalName}」`,
+      `已建立並儲存「${finalName}」`,
       newTplMode === 'blank'
         ? '現在您可以自由編寫固定文字，並隨時點擊「+ 插入變數框」'
         : '已載入基礎信件框架，您可自由修改固定文字與變數框'
@@ -449,7 +580,7 @@ export default function App() {
     }
     setActiveTemplateId(copyId);
     setMobileTab('design');
-    pushToast('已複製範本', `已建立「${duplicated.name}」`);
+    pushToast('已複製並儲存範本', `已建立「${duplicated.name}」`);
   };
 
   // Toggle Pin
@@ -458,24 +589,6 @@ export default function App() {
     setTemplates((prev) =>
       prev.map((t) => (t.id === tplId ? { ...t, isPinned: !t.isPinned } : t))
     );
-  };
-
-  // Confirm Delete Template
-  const handleConfirmDelete = (tplId: string, e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    if (templates.length <= 1) {
-      pushToast('無法刪除最後一個範本', '系統至少需保留一組郵件範本', 'warning');
-      setDeleteConfirmId(null);
-      return;
-    }
-    const target = templates.find((t) => t.id === tplId);
-    const remaining = templates.filter((t) => t.id !== tplId);
-    setTemplates(remaining);
-    if (activeTemplateId === tplId && remaining.length > 0) {
-      setActiveTemplateId(remaining[0].id);
-    }
-    setDeleteConfirmId(null);
-    pushToast('範本已刪除', target ? `已移除「${target.name}」` : undefined);
   };
 
   // Record cursor position and text selection in Subject or Body
@@ -526,10 +639,12 @@ export default function App() {
       updateActiveTemplate({ body: nextBody });
     }
 
-    // Pre-populate the variable value with the original text so nothing is lost
+    if (!variableChips.includes(cleanName)) {
+      setVariableChips((prev) => [cleanName, ...prev]);
+    }
     handleVariableChange(cleanName, cleanName);
     setSelectedTextInfo(null);
-    pushToast(`已將「${cleanName}」轉為變數框`, `已自動建立 ${token} 填空欄位`);
+    pushToast(`已將「${cleanName}」轉為變數框`, `已自動建立 ${token} 填空欄位並加入變數框列表`);
   };
 
   // Insert [變數名稱] at cursor position in active field (Subject or Body)
@@ -595,26 +710,36 @@ export default function App() {
     );
   };
 
-  // Handle custom variable submit
-  const handleAddCustomVariable = (e: React.FormEvent) => {
+  // Add custom variable chip AND insert into template
+  const handleAddAndInsertCustomVariable = (e: React.FormEvent) => {
     e.preventDefault();
     const clean = customVarInput.replace(/[\[\]]/g, '').trim();
     if (!clean) return;
+    if (!variableChips.includes(clean)) {
+      setVariableChips((prev) => [clean, ...prev]);
+    }
     insertVariableAtCursor(clean);
-    if (
-      saveToChipLibrary &&
-      !customChips.includes(clean) &&
-      !QUICK_VARIABLE_CHIPS.some((c) => c.label === clean)
-    ) {
-      setCustomChips((prev) => [...prev, clean]);
+    setCustomVarInput('');
+  };
+
+  // Add custom variable chip to library only
+  const handleAddChipOnly = () => {
+    const clean = customVarInput.replace(/[\[\]]/g, '').trim();
+    if (!clean) return;
+    if (!variableChips.includes(clean)) {
+      setVariableChips((prev) => [clean, ...prev]);
+      pushToast(`已新增自訂變數框 [${clean}]`, '點擊下方標籤即可隨時插入至游標處');
+    } else {
+      pushToast(`變數框 [${clean}] 已存在`, '可直接點擊下方標籤插入', 'warning');
     }
     setCustomVarInput('');
   };
 
-  // Remove a custom saved variable chip
-  const handleRemoveCustomChip = (chipName: string, e: React.MouseEvent) => {
+  // Delete ANY variable chip from the toolbar
+  const handleDeleteVariableChip = (chipName: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setCustomChips((prev) => prev.filter((c) => c !== chipName));
+    setVariableChips((prev) => prev.filter((c) => c !== chipName));
+    pushToast(`已刪除變數框標籤 [${chipName}]`, '已從常用變數框工具列移除');
   };
 
   // Insert fixed boilerplate text snippet into Body
@@ -672,7 +797,7 @@ export default function App() {
     updateActiveTemplate({
       sampleValues: { ...currentValues },
     });
-    pushToast('已設為此範本預設值', '之後點擊「帶入預設值」即可一鍵還原目前填寫內容');
+    pushToast('已儲存為此範本預設值', '之後點擊「帶入預設值」即可一鍵還原目前填寫內容');
   };
 
   // Clear all variable inputs for current template
@@ -958,11 +1083,11 @@ export default function App() {
           MailForge
         </a>
 
-        {/* Zone 2: 4–5 concise single-line text navigation links */}
+        {/* Zone 2: 4 concise single-line text navigation links */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
           <button
             type="button"
-            onClick={() => openNewTemplateDialog('blank')}
+            onClick={handleQuickBlankTemplate}
             className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             新增空白範本
@@ -1046,25 +1171,39 @@ export default function App() {
       <main className="flex-1 max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-5">
         <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
           {/* ====================================================================
-              COLUMN 1 (Left, 3 cols): 郵件範本庫 — 新增自訂範本、切換、備份管理
+              COLUMN 1 (Left, 3 cols): 郵件範本庫
              ==================================================================== */}
           <aside
             className={`xl:col-span-3 bg-white border border-slate-200 rounded-xl flex flex-col overflow-hidden ${
               mobileTab === 'templates' ? 'block' : 'hidden xl:flex'
             }`}
           >
-            {/* Prominent Action: Create Custom Template right inside Sidebar */}
+            {/* Sidebar Header */}
             <div className="p-4 border-b border-slate-200 space-y-3">
               <div className="flex items-center justify-between">
-                <h2 className="text-sm font-bold text-slate-900">
-                  我的郵件範本庫
-                </h2>
-                <span className="text-xs text-slate-500 tabular-nums">
-                  共 {templates.length} 組
-                </span>
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">
+                    我的郵件範本庫
+                  </h2>
+                  <p className="text-[11px] text-slate-500 tabular-nums mt-0.5">
+                    共 {templates.length} 組 · 自動儲存 ({lastSavedTime})
+                  </p>
+                </div>
+
+                {lastDeletedBackup && (
+                  <button
+                    type="button"
+                    onClick={handleUndoDelete}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    title={`還原剛刪除的「${lastDeletedBackup.label}」`}
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                    復原刪除
+                  </button>
+                )}
               </div>
 
-              {/* Dual Create Buttons: Blank vs Modal */}
+              {/* Create New Template Row */}
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -1125,9 +1264,43 @@ export default function App() {
               </div>
             </div>
 
-            {/* Template List */}
+            {/* Template List — Every template has always-visible Save & Delete buttons */}
             <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto">
-              {filteredTemplates.length === 0 ? (
+              {templates.length === 0 ? (
+                <div className="p-8 text-center space-y-3">
+                  <p className="text-sm font-semibold text-slate-800">
+                    範本庫目前已清空
+                  </p>
+                  <p className="text-xs text-slate-500 leading-relaxed">
+                    請點擊下方按鈕建立您的專屬郵件範本，或還原系統預設範本。
+                  </p>
+                  <div className="flex flex-col gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleQuickBlankTemplate}
+                      className="w-full py-2 px-3 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors cursor-pointer"
+                    >
+                      + 新增第一個空白範本
+                    </button>
+                    {lastDeletedBackup && (
+                      <button
+                        type="button"
+                        onClick={handleUndoDelete}
+                        className="w-full py-2 px-3 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors cursor-pointer"
+                      >
+                        復原剛才刪除的範本
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleConfirmResetDefaults}
+                      className="w-full py-2 px-3 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                    >
+                      載入系統預設範本
+                    </button>
+                  </div>
+                </div>
+              ) : filteredTemplates.length === 0 ? (
                 <div className="p-8 text-center space-y-3">
                   <p className="text-xs text-slate-500">
                     找不到符合篩選條件的郵件範本
@@ -1147,19 +1320,18 @@ export default function App() {
                 filteredTemplates.map((tpl) => {
                   const isSelected = activeTemplate?.id === tpl.id;
                   const varCount = extractVariables(tpl.subject, tpl.body).length;
-                  const isConfirmingDelete = deleteConfirmId === tpl.id;
+                  const isJustSaved = savedFeedbackId === tpl.id;
 
                   return (
                     <div
                       key={tpl.id}
                       onClick={() => {
                         setActiveTemplateId(tpl.id);
-                        setDeleteConfirmId(null);
                         if (window.innerWidth < 1280) {
                           setMobileTab('design');
                         }
                       }}
-                      className={`group p-3.5 transition-colors cursor-pointer ${
+                      className={`p-3.5 transition-colors cursor-pointer ${
                         isSelected
                           ? 'bg-indigo-50/80'
                           : 'hover:bg-slate-50'
@@ -1174,15 +1346,16 @@ export default function App() {
                           {tpl.name || '未命名範本'}
                         </h3>
 
+                        {/* Always-visible Pin, Save, Duplicate, and Delete buttons */}
                         <div className="flex items-center gap-1 shrink-0">
                           <button
                             type="button"
                             onClick={(e) => handleTogglePin(tpl.id, e)}
                             title={tpl.isPinned ? '取消釘選' : '釘選常用範本'}
-                            className={`p-1 rounded hover:bg-white/80 transition-colors ${
+                            className={`p-1 rounded hover:bg-white transition-colors cursor-pointer ${
                               tpl.isPinned
                                 ? 'text-amber-500'
-                                : 'text-slate-300 opacity-0 group-hover:opacity-100 hover:text-slate-600'
+                                : 'text-slate-400 hover:text-slate-700'
                             }`}
                           >
                             <Bookmark
@@ -1190,26 +1363,47 @@ export default function App() {
                               fill={tpl.isPinned ? 'currentColor' : 'none'}
                             />
                           </button>
+
+                          <button
+                            type="button"
+                            onClick={(e) => handleSaveSingleTemplate(tpl, e)}
+                            title="儲存此範本"
+                            className={`px-1.5 py-0.5 text-[11px] font-medium rounded border transition-colors cursor-pointer inline-flex items-center gap-1 ${
+                              isJustSaved
+                                ? 'bg-emerald-600 border-emerald-600 text-white'
+                                : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-400 hover:text-indigo-600'
+                            }`}
+                          >
+                            {isJustSaved ? (
+                              <>
+                                <Check className="w-3 h-3" />
+                                已存
+                              </>
+                            ) : (
+                              <>
+                                <Save className="w-3 h-3" />
+                                儲存
+                              </>
+                            )}
+                          </button>
+
                           <button
                             type="button"
                             onClick={(e) => handleDuplicateTemplate(tpl, e)}
                             title="複製此範本"
-                            className="p-1 rounded text-slate-400 opacity-0 group-hover:opacity-100 hover:text-slate-700 hover:bg-white/80 transition-all"
+                            className="p-1 rounded text-slate-500 hover:text-slate-800 hover:bg-white border border-transparent hover:border-slate-200 transition-colors cursor-pointer"
                           >
                             <Files className="w-3.5 h-3.5" />
                           </button>
+
                           <button
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDeleteConfirmId(
-                                isConfirmingDelete ? null : tpl.id
-                              );
-                            }}
+                            onClick={(e) => handleDeleteTemplate(tpl.id, e)}
                             title="刪除此範本"
-                            className="p-1 rounded text-slate-400 opacity-0 group-hover:opacity-100 hover:text-rose-600 hover:bg-white/80 transition-all"
+                            className="px-1.5 py-0.5 text-[11px] font-medium text-rose-600 bg-white border border-rose-200 hover:bg-rose-600 hover:text-white rounded transition-colors cursor-pointer inline-flex items-center gap-0.5"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
+                            刪除
                           </button>
                         </div>
                       </div>
@@ -1219,7 +1413,7 @@ export default function App() {
                         {tpl.subject || '（尚未填寫主旨固定文字）'}
                       </p>
 
-                      {/* Clean Unboxed Metadata with typographic separators */}
+                      {/* Clean Unboxed Metadata */}
                       <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-500 tabular-nums">
                         <span className="font-medium text-slate-600">
                           {tpl.category}
@@ -1234,34 +1428,6 @@ export default function App() {
                           })}
                         </span>
                       </div>
-
-                      {/* Inline Delete Confirmation */}
-                      {isConfirmingDelete && (
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className="mt-2.5 pt-2.5 border-t border-rose-200/80 flex items-center justify-between gap-2"
-                        >
-                          <span className="text-xs font-medium text-rose-700">
-                            確定要刪除此範本？
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setDeleteConfirmId(null)}
-                              className="px-2 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded hover:bg-slate-50"
-                            >
-                              取消
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => handleConfirmDelete(tpl.id, e)}
-                              className="px-2 py-1 text-xs font-medium text-white bg-rose-600 rounded hover:bg-rose-700"
-                            >
-                              確認刪除
-                            </button>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   );
                 })
@@ -1301,25 +1467,53 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setShowResetModal(true)}
-                  className="inline-flex items-center gap-1 hover:text-rose-600 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1 hover:text-indigo-600 transition-colors cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  重置預設範本
+                  還原系統預設範本
                 </button>
               </div>
             </div>
           </aside>
 
           {/* ====================================================================
-              COLUMN 2 (Center, 5 cols): 步驟 1 — 編寫範本固定文字 ＆ 插入變數框
-              Clicking any template opens this editor right at the top!
+              COLUMN 2 (Center, 5 cols): 步驟 1 — 編寫範本固定文字 ＆ 自訂變數框管理
              ==================================================================== */}
           <section
             className={`xl:col-span-5 space-y-5 ${
               mobileTab === 'design' ? 'block' : 'hidden xl:block'
             }`}
           >
-            {activeTemplate && (
+            {!activeTemplate ? (
+              <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-4">
+                <h2 className="text-base font-bold text-slate-900">
+                  目前沒有選取的郵件範本
+                </h2>
+                <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                  您可以點擊下方按鈕立即建立一個全新的空白範本，自由編寫固定文字並插入 <code className="font-mono text-indigo-600">[變數框]</code>。
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleQuickBlankTemplate}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors cursor-pointer shadow-xs"
+                  >
+                    <Plus className="w-4 h-4" />
+                    新增空白範本
+                  </button>
+                  {lastDeletedBackup && (
+                    <button
+                      type="button"
+                      onClick={handleUndoDelete}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors cursor-pointer"
+                    >
+                      <Undo2 className="w-4 h-4" />
+                      復原剛刪除的範本
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
               <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
                 {/* Editor Top Header */}
                 <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/60">
@@ -1338,27 +1532,50 @@ export default function App() {
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleExplicitSave}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      savedFeedback
-                        ? 'bg-emerald-600 border-emerald-600 text-white'
-                        : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
-                    }`}
-                  >
-                    {savedFeedback ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" />
-                        已儲存範本
-                      </>
-                    ) : (
-                      <>
-                        <Save className="w-3.5 h-3.5 text-indigo-600" />
-                        儲存範本修改
-                      </>
-                    )}
-                  </button>
+                  {/* Direct Save, Save As New, and Delete buttons for the current template */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSaveSingleTemplate(activeTemplate)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        savedFeedbackId === activeTemplate.id
+                          ? 'bg-emerald-600 border-emerald-600 text-white'
+                          : 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700'
+                      }`}
+                    >
+                      {savedFeedbackId === activeTemplate.id ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          已儲存範本 ✓
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-3.5 h-3.5" />
+                          儲存此範本
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleSaveAsNewTemplate}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      title="將目前編輯的內容另存為一組新的範本"
+                    >
+                      <FolderPlus className="w-3.5 h-3.5 text-slate-500" />
+                      另存新範本
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTemplate(activeTemplate.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-rose-600 bg-white border border-rose-200 rounded-lg hover:bg-rose-600 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      title="從範本庫刪除此範本"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      刪除此範本
+                    </button>
+                  </div>
                 </div>
 
                 <div className="p-5 space-y-4">
@@ -1407,14 +1624,15 @@ export default function App() {
                   </div>
 
                   {/* ====================================================
-                      VARIABLE BOX INSERTION STUDIO (插入變數框控制台)
+                      VARIABLE BOX INSERTION & MANAGEMENT STUDIO
+                      Supports both ADDING and DELETING custom variable boxes!
                      ==================================================== */}
                   <div className="p-4 bg-indigo-50/50 border border-indigo-200/80 rounded-xl space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5">
                         <Brackets className="w-4 h-4 text-indigo-600" />
                         <span className="text-xs font-bold text-slate-900">
-                          插入變數框工具列
+                          自訂變數框管理（可自由新增、點擊插入或刪除標籤）
                         </span>
                       </div>
 
@@ -1456,7 +1674,7 @@ export default function App() {
 
                     {/* Custom Variable Box Creator Input */}
                     <form
-                      onSubmit={handleAddCustomVariable}
+                      onSubmit={handleAddAndInsertCustomVariable}
                       className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
                     >
                       <div className="relative flex-1">
@@ -1468,16 +1686,26 @@ export default function App() {
                           className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-indigo-600"
                         />
                       </div>
-                      <button
-                        type="submit"
-                        className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        插入 [{customVarInput.trim() || '自訂變數框'}] 至{lastFocusedField === 'subject' ? '主旨' : '內文'}
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleAddChipOnly}
+                          className="inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-semibold text-indigo-700 bg-white border border-indigo-300 hover:bg-indigo-50 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          新增至標籤庫
+                        </button>
+                        <button
+                          type="submit"
+                          className="inline-flex items-center justify-center gap-1 px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          新增並插入至{lastFocusedField === 'subject' ? '主旨' : '內文'}
+                        </button>
+                      </div>
                     </form>
 
-                    {/* Highlighted Text to Variable Box Action (Appears or stays available) */}
+                    {/* Highlighted Text to Variable Box Action */}
                     {selectedTextInfo && (
                       <div className="flex items-center justify-between gap-2 px-3 py-2 bg-amber-50 border border-amber-300 rounded-lg">
                         <span className="text-xs text-amber-900">
@@ -1494,53 +1722,50 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Quick Preset & Custom Saved Variable Chips */}
+                    {/* All Variable Box Chips — Every single chip can be clicked to insert OR deleted via × */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-[11px] text-slate-500">
-                        <span>點擊下方標籤，立即在游標位置插入變數框：</span>
-                        <label className="inline-flex items-center gap-1 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={saveToChipLibrary}
-                            onChange={(e) => setSaveToChipLibrary(e.target.checked)}
-                            className="rounded border-slate-300 text-indigo-600"
-                          />
-                          記住我新增的自訂變數標籤
-                        </label>
+                        <span>點擊標籤插入至游標處，點擊右側「×」即可刪除該變數框標籤：</span>
+                        <button
+                          type="button"
+                          onClick={() => setVariableChips(DEFAULT_VARIABLE_CHIPS)}
+                          className="text-slate-500 hover:text-indigo-600 underline cursor-pointer"
+                        >
+                          重置預設變數標籤
+                        </button>
                       </div>
 
-                      <div className="flex flex-wrap gap-1.5">
-                        {/* User's custom chips */}
-                        {customChips.map((chip) => (
-                          <button
-                            key={`custom-${chip}`}
-                            type="button"
-                            onClick={() => insertVariableAtCursor(chip)}
-                            className="group inline-flex items-center gap-1 px-2 py-1 text-xs font-mono font-medium text-indigo-700 bg-indigo-100/80 border border-indigo-300 rounded-md hover:bg-indigo-600 hover:text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            <span>+ [{chip}]</span>
-                            <span
-                              onClick={(e) => handleRemoveCustomChip(chip, e)}
-                              className="ml-0.5 text-indigo-400 group-hover:text-white/80 hover:text-rose-200"
-                              title="移除此常用標籤"
+                      {variableChips.length === 0 ? (
+                        <div className="py-2.5 px-3 text-xs text-slate-500 bg-white/80 rounded-lg border border-dashed border-slate-200 text-center">
+                          目前沒有常用變數標籤，請由上方輸入框新增自訂變數框。
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap gap-1.5">
+                          {variableChips.map((chip) => (
+                            <div
+                              key={chip}
+                              className="inline-flex items-center bg-white border border-slate-200 rounded-md overflow-hidden hover:border-indigo-400 transition-colors"
                             >
-                              ×
-                            </span>
-                          </button>
-                        ))}
-
-                        {/* Built-in quick chips */}
-                        {QUICK_VARIABLE_CHIPS.map((chip) => (
-                          <button
-                            key={chip.label}
-                            type="button"
-                            onClick={() => insertVariableAtCursor(chip.label)}
-                            className="px-2 py-1 text-xs font-mono text-slate-700 bg-white border border-slate-200 rounded-md hover:border-indigo-500 hover:text-indigo-600 hover:bg-indigo-50/40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            + [{chip.label}]
-                          </button>
-                        ))}
-                      </div>
+                              <button
+                                type="button"
+                                onClick={() => insertVariableAtCursor(chip)}
+                                className="px-2 py-1 text-xs font-mono text-slate-700 hover:text-indigo-600 hover:bg-indigo-50/50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                                title={`點擊在游標位置插入 [${chip}]`}
+                              >
+                                + [{chip}]
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => handleDeleteVariableChip(chip, e)}
+                                className="px-1.5 py-1 text-xs text-slate-400 hover:text-rose-600 hover:bg-rose-50 border-l border-slate-100 transition-colors cursor-pointer"
+                                title={`刪除 [${chip}] 標籤`}
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1613,7 +1838,6 @@ export default function App() {
                         )}
                       </label>
 
-                      {/* Quick Fixed Text Boilerplate Helpers */}
                       <div className="flex items-center gap-2 text-xs">
                         <span className="text-[11px] text-slate-400">
                           插入固定段落：
@@ -1662,18 +1886,25 @@ export default function App() {
                       }`}
                     />
 
-                    {/* Detected Variable Summary Footer */}
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                    {/* Detected Variable Summary & Bottom Save Bar */}
+                    <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
                       <span>
-                        目前已在此範本偵測到{' '}
+                        目前已偵測到{' '}
                         <strong className="text-indigo-600 tabular-nums">
                           {detectedVariables.length}
                         </strong>{' '}
-                        個變數框
+                        個變數框 · 總長 {activeTemplate.body.length} 字
                       </span>
-                      <span className="tabular-nums">
-                        固定文字與範本總長：{activeTemplate.body.length} 字
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleSaveSingleTemplate(activeTemplate)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors cursor-pointer"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          儲存此範本
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1805,6 +2036,14 @@ export default function App() {
                                     <AlignLeft className="w-3.5 h-3.5" />
                                   )}
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveVariableFromTemplate(varName)}
+                                  className="text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                                  title={`從範本中刪除 [${varName}] 變數框`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             </div>
 
@@ -1904,10 +2143,11 @@ export default function App() {
               <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 grid grid-cols-2 gap-2.5">
                 <button
                   type="button"
+                  disabled={!activeTemplate}
                   onClick={() =>
                     handleCopyText(renderedSubject, 'subject', '郵件主旨')
                   }
-                  className={`flex items-center justify-center gap-1.5 py-2.5 px-4 text-xs font-semibold rounded-lg border transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`flex items-center justify-center gap-1.5 py-2.5 px-4 text-xs font-semibold rounded-lg border transition-all whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 ${
                     copiedKey === 'subject'
                       ? 'bg-emerald-600 border-emerald-600 text-white'
                       : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100 hover:border-slate-400'
@@ -1928,10 +2168,11 @@ export default function App() {
 
                 <button
                   type="button"
+                  disabled={!activeTemplate}
                   onClick={() =>
                     handleCopyText(renderedBody, 'body', '郵件內文')
                   }
-                  className={`flex items-center justify-center gap-1.5 py-2.5 px-4 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`flex items-center justify-center gap-1.5 py-2.5 px-4 text-xs font-semibold rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 ${
                     copiedKey === 'body'
                       ? 'bg-emerald-600 text-white'
                       : 'bg-indigo-600 text-white hover:bg-indigo-700'
@@ -1951,21 +2192,12 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Live Subject Preview Box */}
+              {/* Live Subject Preview Box (Removed the duplicate copy button on the right) */}
               <div className="px-5 py-3 bg-slate-50/60 border-b border-slate-200">
                 <div className="flex items-center justify-between gap-2 mb-1">
                   <span className="text-[11px] font-semibold text-slate-400">
                     主旨預覽 (SUBJECT)
                   </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCopyText(renderedSubject, 'subject', '郵件主旨')
-                    }
-                    className="text-xs font-medium text-indigo-600 hover:text-indigo-800 cursor-pointer"
-                  >
-                    {copiedKey === 'subject' ? '已複製 ✓' : '複製'}
-                  </button>
                 </div>
 
                 <div className="text-sm font-semibold text-slate-900 leading-snug break-words min-h-[1.5rem]">
@@ -1992,11 +2224,7 @@ export default function App() {
                               : 'bg-amber-100/90 text-amber-900 font-mono text-xs'
                           }`}
                         >
-                          {seg.isFilled
-                            ? seg.value
-                            : keepEmptyBrackets
-                            ? `[${seg.varName}]`
-                            : ''}
+                          {seg.isFilled ? seg.value : `[${seg.varName}]`}
                         </span>
                       )
                     )
@@ -2006,21 +2234,12 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Live Body Preview Canvas */}
+              {/* Live Body Preview Canvas (Removed the "未填寫時保留 [變數框]" checkbox) */}
               <div className="p-5 flex-1 max-h-[380px] overflow-y-auto">
                 <div className="flex items-center justify-between gap-2 mb-2">
                   <span className="text-[11px] font-semibold text-slate-400">
                     內文預覽 (BODY)
                   </span>
-                  <label className="inline-flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={keepEmptyBrackets}
-                      onChange={(e) => setKeepEmptyBrackets(e.target.checked)}
-                      className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    未填寫時保留 [變數框]
-                  </label>
                 </div>
 
                 <div className="text-sm text-slate-800 leading-relaxed whitespace-pre-wrap break-words font-sans min-h-[120px]">
@@ -2047,11 +2266,7 @@ export default function App() {
                               : 'bg-amber-100/90 text-amber-900 font-mono text-xs'
                           }`}
                         >
-                          {seg.isFilled
-                            ? seg.value
-                            : keepEmptyBrackets
-                            ? `[${seg.varName}]`
-                            : ''}
+                          {seg.isFilled ? seg.value : `[${seg.varName}]`}
                         </span>
                       )
                     )
@@ -2065,6 +2280,7 @@ export default function App() {
               <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2">
                 <button
                   type="button"
+                  disabled={!activeTemplate}
                   onClick={() =>
                     handleCopyText(
                       `主旨：${renderedSubject}\n\n${renderedBody}`,
@@ -2072,7 +2288,7 @@ export default function App() {
                       '完整郵件（含主旨與內文）'
                     )
                   }
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40"
                 >
                   {copiedKey === 'full' ? (
                     <>
@@ -2105,7 +2321,7 @@ export default function App() {
       <footer className="mt-auto border-t border-slate-200 bg-white py-4 px-6">
         <div className="max-w-[1600px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
           <span>
-            MailForge 高級郵件草稿快速生成工具 · 所有自訂範本、固定文字與變數皆自動儲存於瀏覽器 (localStorage)
+            MailForge 高級郵件草稿快速生成工具 · 資料自動安全儲存於本機瀏覽器 (localStorage)
           </span>
           <div className="flex items-center gap-4">
             <button
@@ -2240,7 +2456,7 @@ export default function App() {
                 type="submit"
                 className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors cursor-pointer"
               >
-                立即建立並開始編寫
+                立即建立並儲存
               </button>
             </div>
           </form>
@@ -2248,7 +2464,7 @@ export default function App() {
       )}
 
       {/* ============================================================
-          MODAL 1: IMPORT JSON MERGE VS REPLACE CONFIRMATION
+          MODAL 2: IMPORT JSON MERGE VS REPLACE CONFIRMATION
          ============================================================ */}
       {importPendingData && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
@@ -2314,16 +2530,16 @@ export default function App() {
       )}
 
       {/* ============================================================
-          MODAL 2: RESET TO DEFAULTS CONFIRMATION
+          MODAL 3: RESET TO DEFAULTS CONFIRMATION
          ============================================================ */}
       {showResetModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-6 shadow-xl space-y-4">
             <h3 className="text-base font-bold text-slate-900">
-              確定要重置為系統預設範本嗎？
+              確定要還原為系統預設範本嗎？
             </h3>
             <p className="text-xs text-slate-600 leading-relaxed">
-              這將會還原系統內建的 6 組商務郵件範本與預設範例資料。若您有自訂的重要範本，建議先點擊「匯出範本 JSON」進行備份。
+              這將會載入系統內建的 3 組商務郵件範本與預設範例資料。若您有自訂的重要範本，建議先點擊「匯出範本 JSON」進行備份。
             </p>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
@@ -2336,9 +2552,9 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleConfirmResetDefaults}
-                className="px-4 py-2 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors"
+                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors"
               >
-                確認重置預設範本
+                確認還原預設範本
               </button>
             </div>
           </div>
@@ -2346,7 +2562,7 @@ export default function App() {
       )}
 
       {/* ============================================================
-          MODAL 3: RECENT COPY HISTORY
+          MODAL 4: RECENT COPY HISTORY
          ============================================================ */}
       {showHistoryModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
