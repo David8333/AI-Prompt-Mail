@@ -27,7 +27,13 @@ import {
   Wand2,
   FolderPlus,
   Undo2,
+  Lock,
 } from 'lucide-react';
+import {
+  LoginGate,
+  isAuthenticatedForToday,
+  clearAuthentication,
+} from './components/LoginGate';
 import {
   EmailTemplate,
   TemplateCategory,
@@ -71,6 +77,11 @@ interface ToastMessage {
 }
 
 export default function App() {
+  // 0. Daily Password Authentication State (DV + 今日日期)
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() =>
+    isAuthenticatedForToday()
+  );
+
   // 1. Persistent Templates State — Filters out removed categories/templates & respects empty array []
   const [templates, setTemplates] = useState<EmailTemplate[]>(() => {
     try {
@@ -1058,6 +1069,10 @@ export default function App() {
     }`;
   }, [recipientEmail, ccEmail, renderedSubject, renderedBody]);
 
+  if (!isAuthenticated) {
+    return <LoginGate onSuccess={() => setIsAuthenticated(true)} />;
+  }
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
       {/* Hidden file input for JSON Import */}
@@ -1083,7 +1098,7 @@ export default function App() {
           MailForge
         </a>
 
-        {/* Zone 2: 4 concise single-line text navigation links */}
+        {/* Zone 2: 5 concise single-line text navigation links */}
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
           <button
             type="button"
@@ -1112,6 +1127,16 @@ export default function App() {
             className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             匯出備份
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              clearAuthentication();
+              setIsAuthenticated(false);
+            }}
+            className="hover:text-rose-600 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            登出鎖定
           </button>
         </nav>
 
